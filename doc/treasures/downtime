@@ -12,32 +12,33 @@
 # contact for all relevant objects.
 
 # Restrictions / Bugs
-# - When removing host downtimes, always *all* services downtimes
-#   are also removed
 # - When removing service downtimes the service names are interpreted
 #   as regular expressions, but not when setting
-# -> We need a specialized view for the downtimes. Or even better
-#    implement the "Remove all downtimes" button in a normal hosts/
-#    services views.
 
-import os, sys, getopt, time, urllib
+import os
+import sys
+import getopt
+import urllib
+import ast
 
 omd_site = os.getenv("OMD_SITE")
 omd_root = os.getenv("OMD_ROOT")
 
 
 def bail_out(reason):
-    sys.stderr.write(reason + "\n")
+    sys.stderr.write("Error: %s\n" % reason)
     sys.exit(1)
 
+def warn_out(text):
+    sys.stdout.write("Warning: %s\n" % text)
 
 def verbose(text):
     if opt_verbose:
-        sys.stdout.write(text + "\n")
+        sys.stdout.write("%s\n" % text)
 
 
 def usage():
-    sys.stdout.write("""Usage: downtime [-r] [OPTIONS] HOST [SERVICE1] [SERVICE2...]
+    sys.stdout.write("""Usage: downtime [OPTIONS] -H HOST/-G HOSTGROUP -S [SERVICE1, SERVICE2, ...]
 
 This program sets and removes downtimes on hosts and services
 via command line. If you run this script from within an OMD
@@ -53,31 +54,40 @@ for all relevant objects.
 
 Options:
   -v, --verbose    Show what's going on (specify twice for more verbose output)
-  -s, --set        Set downtime (this is the default and thus optional)
-  -r, --remove     Remove all downtimes from that host/service
-  -c, --comment    Comment for the downtime (otherwise "Automatic downtime")
+  -m, --mode       Either add or remove
+  -A, --add        Short form of --mode 'add'
+  -R, --remove     Short form of --mode 'remove'
+  -t, --target     Target host, hostgroup, service, servicegroup
+  -H  --host       Hostname
+  -G  --group      Group
+  -S  --services   Services
+  -c, --comment    Comment for the downtime or filter expr. when mode remove
   -d, --duration   Duration of the downtime in minutes (default: 120)
   -h, --help       Show this help and exit
   -u, --user       Name of automation user (default: "automation")
-  -S, --secret     Automation secret (default: read from user settings)
+  -s, --secret     Automation secret (default: read from user settings)
   -U, --url        Base-URL of Multisite (default: guess local OMD site)
-  -a, --all        Include all services when setting/removing host downtime
 """)
 
 
-short_options = 'vhrsc:d:u:S:aU:'
+short_options = 'vhARm:H:G:S:t:c:l:d:u:s:U:'
 long_options = [
-    "verbose", "help", "set", "remove", "comment=", "url=", "duration=", "user=", "secret=", "all"
+    "verbose", "help", "add", "remove", "mode=", "host=", "group=", "services=", "target=", "comment=",
+    "url=", "duration=", "user=", "secret=", "all"
 ]
 
-opt_all = False
 opt_verbose = 0
-opt_mode = 'set'
-opt_comment = "Automatic downtime"
+opt_mode = "add"
+opt_target = "host"
+#opt_comment = "Automatic downtime"
+opt_comment = None
 opt_user = "automation"
 opt_secret = None
-opt_url = None
+opt_url = ""
 opt_duration = 120
+opt_group = None
+opt_host = None
+opt_services = ""
 
 if omd_site:
     opt_url = "http://localhost/" + omd_site + "/check_mk/"
@@ -85,6 +95,10 @@ try:
     opts, args = getopt.getopt(sys.argv[1:], short_options, long_options)
 except getopt.GetoptError as err:
     sys.stderr.write("%s\n\n" % err)
+    usage()
+    sys.exit(1)
+
+if len(sys.argv[1:]) == 0:
     usage()
     sys.exit(1)
 
@@ -97,84 +111,100 @@ for o, a in opts:
     # Modifiers
     elif o in ['-v', '--verbose']:
         opt_verbose += 1
-    elif o in ['-a', '--all']:
-        opt_all = True
-    elif o in ['-s', '--set']:
-        opt_mode = 'set'
-    elif o in ['-r', '--remove']:
+    elif o in ['-m', '--mode']:
+        opt_mode = a
+    elif o in ['-A', '--add']:
+        opt_mode = 'add'
+    elif o in ['-R', '--remove']:
         opt_mode = 'remove'
+    elif o in ['-t', '--target']:
+        opt_target = a
     elif o in ['-c', '--comment']:
         opt_comment = a
     elif o in ['-d', '--duration']:
         opt_duration = int(a)
     elif o in ['-u', '--user']:
         opt_user = a
-    elif o in ['-S', '--secret']:
+    elif o in ['-s', '--secret']:
         opt_secret = a
     elif o in ['-U', '--url']:
         opt_url = a
+    elif o in ['-S', '--services']:
+        opt_services = a
+    elif o in ['-G', '--groups']:
+        opt_group = a
+    elif o in ['-H', '--host']:
+        opt_host = a
+    else:
+        bail_out("Option '" + o + "' is unknown.")
+
+if opt_target in ["host", "service"]:
+    if not opt_host:
+        bail_out("Please specify a Host with -H.")
+    if opt_group:
+        warn_out("Option '-G group' is ignored when used in combination with Option '-t %s'." % opt_target)
+
+if opt_target in ["hostgroup", "servicegroup"] and not opt_group:
+    bail_out("Please specify a Group -G.")
+
+if opt_target == "service" and not opt_services:
+    bail_out("Please specify a Services with -S.")
+
+if opt_services and opt_target in ["host", "hostgroup", "servicegroup"]:
+    warn_out("Option '-S service' is ignored when used in combination with Option '-t %s'." % opt_target)
+
+if not opt_url or opt_user.startswith("http"):
+    bail_out("Please specify the URL to Check_MK Multisite with -U (uppercase).")
+
+if not opt_url.endswith("/check_mk/"):
+    bail_out("The automation URL must end with '.../check_mk/'.")
+
+if not opt_user:
+    bail_out("Please specify the automation user to use with -u (lowercase).")
 
 if omd_site and not opt_secret:
     try:
-        opt_secret = open(omd_root + "/var/check_mk/web/" + opt_user +
-                          "/automation.secret").read().strip()
-    except Exception as e:
-        bail_out("Cannot read automation secret from user %s: %s" % (opt_user, e))
+        opt_secret = open( str(omd_root) + "/var/check_mk/web/" + str(opt_user) + "/automation.secret" ).read().strip()
+    except Exception as e:  #pylint: disable=broad-except
+        bail_out("Cannot read automation secret from user %s: %s." % (opt_user, e))
 
 elif not omd_site and not opt_secret:
-    bail_out("Please specify the automation secret for the user '%s'!" % opt_user)
+    bail_out("Please specify the automation secret for the user '%s' with -s!" % opt_user)
 
-if not opt_url:
-    bail_out("Please specify the URL to Check_MK Multisite with -U.")
-
-if not opt_url.endswith("/check_mk/"):
-    bail_out("The automation URL must end with /check_mk/")
-
-if not args:
-    bail_out("Please specify the host to set a downtime for.")
-
-arg_host = args[0]
-arg_services = args[1:]
-
-if opt_mode == "set":
-    verbose("Mode:          set downtime")
-    verbose("Duration:      %dm" % opt_duration)
-else:
-    verbose("Mode:          remove downtimes")
-verbose("Host:          " + arg_host)
-if arg_services:
-    verbose("Services:      " + " ".join(arg_services))
-verbose("Multisite-URL: " + opt_url)
+if opt_verbose > 1:
+    verbose("Multisite-URL: " + opt_url)
 verbose("User:          " + opt_user)
-verbose("Secret:        " + (opt_secret or "(none specified)"))
+if opt_verbose > 2:
+    verbose("Secret:        " + (opt_secret or "(none specified)"))
 
 
-def make_url(base, variables):
-    vartext = "&".join(["%s=%s" % (varname, urllib.quote(value)) for (varname, value) in variables])
+def make_url(base, url_variables):
+    vartext = "&".join(["%s=%s" % (varname, urllib.quote(value)) for (varname, value) in url_variables])
     return base + "?" + vartext
 
 
-def set_downtime(variables, add_vars):
-    url = make_url(opt_url + "view.py", variables + add_vars)
-    verbose("URL:           " + url)
+def make_request(url_variables):
+    url = make_url(opt_url + "view.py", url_variables)
+    if opt_verbose > 1:
+        verbose("URL:           " + url)
     try:
         pipe = urllib.urlopen(url)
-        lines = pipe.readlines()
-        verbose(" --> Got %d lines of response" % len(lines))
+        raw = pipe.read()
+        lines = raw.split('\n')
         if opt_verbose > 1:
+            verbose(" --> Got %d lines of response" % len(lines))
+        if opt_verbose > 2:
             for line in lines:
                 verbose("OUTPUT: %s" % line.rstrip())
         for line in lines:
-            if line.startswith('<div class=error>'):
-                bail_out(line[17:].split('<')[0])
-    except Exception as e:
-        bail_out("Cannot call Multisite URL: %s" % e)
+            if "HINWEIS" in line:
+                sys.stdout.write(line + "\n")
+            if line.startswith("<div class=error>"):
+                bail_out(line[17:].split("<")[0])
+        return raw
+    except Exception as e:  #pylint: disable=broad-except
+        bail_out("Cannot call Multisite URL: %s." % e)
 
-
-# We have 6 different modes:
-# Only the host           | 1: set | 4: remove
-# Only specific services  | 2: set | 5: remove
-# Host and all services   | 3: set | 6: remove
 
 # Authentication and host selection
 variables = [
@@ -183,31 +213,127 @@ variables = [
     ("_transid", "-1"),
     ("_do_confirm", "yes"),
     ("_do_actions", "yes"),
-    ("host", arg_host),
 ]
 
-# Action variables for setting or removing (works in all views)
-if opt_mode == "remove":
-    variables += [
-        ("_remove_downtimes", "Remove"),
-        ("_down_remove", "Remove"),
-    ]
-else:
+if opt_mode == "add":
+
+    # Check Options
+    if not opt_duration:
+        bail_out("Please specify duration (-d).")
+    if not opt_comment:
+        opt_comment = "Automatic downtime set by %s script." % os.path.splitext(os.path.basename(sys.argv[0]))[0]
+
+    # Add Downtimes
+    verbose("Modus:         Add Downtime")
+    verbose("Target:        %s" % opt_target)
+    verbose("Duration:      %dm" % opt_duration)
+    verbose("Comment:       %s" % opt_comment)
     variables += [
         ("_down_from_now", "yes"),
         ("_down_minutes", str(opt_duration)),
         ("_down_comment", opt_comment),
     ]
 
-# Downtime on host (handles 1 & 4, needed for 3 & 6)
-if not arg_services:
-    set_downtime(variables, [("view_name", "hoststatus")])
+    if opt_target == "host":
+        verbose("Host:          %s" % opt_host)
+        variables.append(("host", opt_host))
+        variables.append(("view_name", "hoststatus"))
+        variables.append(("output_format", "python"))
+        make_request(variables)
 
-# Downtime on specific services (handles 2 & 5)
+    elif opt_target == "hostgroup":
+        verbose("Hostgroup:     %s" % opt_group)
+        variables.append(("hostgroup_regex", opt_group))
+        variables.append(("view_name", "hostsbygroup"))
+        variables.append(("output_format", "python"))
+        make_request(variables)
+
+    elif opt_target == "servicegroup":
+        verbose("Servicegroup:  %s" % opt_group)
+        variables.append(("servicegroup", opt_group))
+        variables.append(("view_name", "servicegroup"))
+        variables.append(("output_format", "python"))
+        make_request(variables)
+
+    elif opt_target == "service":
+        verbose("Host:          %s" % opt_host)
+        variables.append(("host", opt_host))
+        variables.append(("view_name", "service"))
+        variables.append(("output_format", "python"))
+        for service in [x.strip() for x in opt_services.split(',')]:
+            verbose("Service:       %s" % service)
+            make_request(variables + [("service", service)])
+
+    else:
+        bail_out("Target '%s' unkown." % opt_target)
+
+elif opt_mode == "remove":
+
+    # Remove Downtimes
+    verbose("Modus:         Remove Downtime")
+    verbose("Target:        %s" % opt_target)
+    variables += [
+        ("_remove_downtimes", "Remove"),
+    ]
+
+    if opt_comment:
+        verbose("Limit by:      %s" % opt_comment)
+        variables.append(("downtime_comment", opt_comment))
+
+    if opt_target == "host":
+        verbose("Host:          %s" % opt_host)
+        variables.append(("host", opt_host))
+        variables.append(("is_service_scheduled_downtime_depth", '0'))
+        variables.append(("view_name", "downtimes"))
+        variables.append(("output_format", "python"))
+        make_request(variables)
+
+    elif opt_target == "hostgroup":
+        verbose("Hostgroup:     %s" % opt_group)
+        # Frist search for a list of affected hosts
+        search_variables = [
+            ("hostgroup", opt_group),
+            ("output_format", "python"),
+            ("view_name", "hostsbygroup"),
+        ]
+        objects = make_request(variables + search_variables)
+
+        variables.append(("view_name", "downtimes"))
+        variables.append(("is_service_scheduled_downtime_depth", '0'))
+        variables.append(("output_format", "python"))
+        for entry in ast.literal_eval(objects)[1:]:
+            verbose("Host:          %s" % entry[1])
+            make_request(variables + [("host", entry[1])])
+
+    elif opt_target == "servicegroup":
+        verbose("Servicegroup:  %s" % opt_group)
+        search_variables = [
+            ("servicegroup", opt_group),
+            ("output_format", "python"),
+            ("view_name", "svcbygroups"),
+        ]
+        # get list of matching service downtimes
+        objects = make_request(variables + search_variables)
+
+        variables.append(("view_name", "downtimes_of_service"))
+        variables.append(("output_format", "python"))
+        for entry in ast.literal_eval(objects)[1:]:
+            host = entry[0]
+            service = entry[2]
+            verbose("Host:          %s" % host)
+            verbose("Service:       %s" % service)
+            make_request(variables + [("host", host), ("service", service)])
+
+    elif opt_target == "service":
+        verbose("Host:          %s" % opt_host)
+        variables.append(("host", opt_host))
+        variables.append(("view_name", "downtimes_of_service"))
+        variables.append(("output_format", "python"))
+        for service in [x.strip() for x in opt_services.split(',')]:
+            verbose("Service:       %s" % service)
+            make_request(variables + [("service", service)])
+    else:
+        bail_out("Target '%s' unkown" % opt_target)
+
 else:
-    for service in arg_services:
-        set_downtime(variables, [("view_name", "service"), ("service", service)])
-
-# Handle services for option --all (3 & 6)
-if opt_all:
-    set_downtime(variables, [("view_name", "host")])
+    bail_out("Mode '%s' unknwon" % opt_mode)
