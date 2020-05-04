@@ -120,6 +120,20 @@ function run_cached {
     fi
 }
 
+run_mrpe() {
+    local descr=$1
+    shift
+    local cmdline=$*
+
+    echo '<<<mrpe>>>'
+
+    PLUGIN=${cmdline%% *}
+    OUTPUT=$(eval "$cmdline")
+
+    echo -n "(${PLUGIN##*/}) $descr $? $OUTPUT" | tr \\n \\1
+    echo
+}
+
 echo "<<<check_mk>>>"
 echo "Version: 1.7.0i1"
 echo "AgentOS: aix"
@@ -388,14 +402,37 @@ fi
 if [ -e "$MK_CONFDIR/mrpe.cfg" ]
 then
     echo '<<<mrpe>>>'
-    grep -Ev '^[[:space:]]*($|#)' "$MK_CONFDIR/mrpe.cfg" | \
-    while read descr cmdline
-    do
-        PLUGIN=${cmdline%% *}
-        OUTPUT=$(eval "$cmdline")
-        echo "(${PLUGIN##*/}) $descr $? $OUTPUT" | tr \\n \\1
-        echo
-    done
+    grep -Ev '^[[:space:]]*($|#)' "$MK_CONFDIR/mrpe.cfg" |
+        while read -r descr cmdline; do
+            interval=
+            args="-m"
+            # NOTE: Due to an escaping-related bug in some old bash versions
+            # (3.2.x), we have to use an intermediate variable for the pattern.
+            pattern='\(([^\)]*)\)[[:space:]](.*)'
+            if [[ $cmdline =~ $pattern ]]; then
+                parameters=${BASH_REMATCH[1]}
+                cmdline=${BASH_REMATCH[2]}
+
+                # split multiple parameter assignments
+                for par in $(echo "$parameters" | tr ":" "\n"); do
+                    # split each assignment
+                    key=$(echo "$par" | cut -d= -f1)
+                    value=$(echo "$par" | cut -d= -f2)
+
+                    if [ "$key" = "interval" ]; then
+                        interval=$value
+                    elif [ "$key" = "appendage" ]; then
+                        args="-ma"
+                    fi
+                done
+            fi
+
+            if [ -z "$interval" ]; then
+                run_mrpe "$descr" "$cmdline"
+            else
+                run_cached "$args" "$descr" "$interval" "$cmdline"
+            fi
+        done
 fi
 
 # Agent output snippets created by cronjobs, etc.
