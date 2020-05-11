@@ -121,9 +121,9 @@ function run_cached {
 }
 
 run_mrpe() {
-    local descr=$1
+    descr=$1
     shift
-    local cmdline=$*
+    cmdline=$*
 
     echo '<<<mrpe>>>'
 
@@ -406,12 +406,9 @@ then
         while read -r descr cmdline; do
             interval=
             args="-m"
-            # NOTE: Due to an escaping-related bug in some old bash versions
-            # (3.2.x), we have to use an intermediate variable for the pattern.
-            pattern='\(([^\)]*)\)[[:space:]](.*)'
-            if [[ $cmdline =~ $pattern ]]; then
-                parameters=${BASH_REMATCH[1]}
-                cmdline=${BASH_REMATCH[2]}
+            if [[ $cmdline =~ \(([^\)]*)\)[[:space:]](.*) ]]; then
+                parameters=${.sh.match[1]}
+                cmdline=${.sh.match[2]}
 
                 # split multiple parameter assignments
                 for par in $(echo "$parameters" | tr ":" "\n"); do
