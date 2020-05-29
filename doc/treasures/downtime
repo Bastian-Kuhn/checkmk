@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# -*- coding: utf-8 -*- # Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -55,6 +54,7 @@ for all relevant objects.
 Options:
   -v, --verbose    Show what's going on (specify twice for more verbose output)
   -m, --mode       Either add or remove
+  -f, --force      Removal all downtimes without filtering by current user when not using comment filter
   -A, --add        Short form of --mode 'add'
   -R, --remove     Short form of --mode 'remove'
   -t, --target     Target host, hostgroup, service, servicegroup
@@ -67,13 +67,14 @@ Options:
   -u, --user       Name of automation user (default: "automation")
   -s, --secret     Automation secret (default: read from user settings)
   -U, --url        Base-URL of Multisite (default: guess local OMD site)
+  -T, --timerange  Fixed Timerange like: "2020-05-29T14:30 2020-05-30T17:00"
 """)
 
 
-short_options = 'vhARm:H:G:S:t:c:l:d:u:s:U:'
+short_options = 'vhARfm:H:G:S:t:c:l:d:u:s:U:T:'
 long_options = [
     "verbose", "help", "add", "remove", "mode=", "host=", "group=", "services=", "target=", "comment=",
-    "url=", "duration=", "user=", "secret=", "all"
+    "url=", "duration=", "user=", "secret=", "force", "timerange="
 ]
 
 opt_verbose = 0
@@ -88,6 +89,8 @@ opt_duration = 120
 opt_group = None
 opt_host = None
 opt_services = ""
+opt_force = False
+opt_timerange = ""
 
 if omd_site:
     opt_url = "http://localhost/" + omd_site + "/check_mk/"
@@ -135,6 +138,10 @@ for o, a in opts:
         opt_group = a
     elif o in ['-H', '--host']:
         opt_host = a
+    elif o in ['-f', '--force']:
+        opt_force = True
+    elif o in ['-T', '--timerange']:
+        opt_timerange = a
     else:
         bail_out("Option '" + o + "' is unknown.")
 
@@ -226,13 +233,26 @@ if opt_mode == "add":
     # Add Downtimes
     verbose("Modus:         Add Downtime")
     verbose("Target:        %s" % opt_target)
-    verbose("Duration:      %dm" % opt_duration)
     verbose("Comment:       %s" % opt_comment)
     variables += [
-        ("_down_from_now", "yes"),
-        ("_down_minutes", str(opt_duration)),
         ("_down_comment", opt_comment),
     ]
+
+    if opt_timerange:
+        verbose("Timerange:      %s" % opt_timerange)
+        start, end = opt_timerange.split()
+        start_date, start_time = start.split("T")
+        end_date, end_time = end.split("T")
+
+        variables.append(("_down_from_date", start_date))
+        variables.append(("_down_from_time", start_time))
+        variables.append(("_down_to_date", end_date))
+        variables.append(("_down_to_time", end_time))
+        variables.append(("_down_custom", "Custom time range"))
+    else:
+        variables.append(("_down_from_now", "yes"))
+        variables.append(("_down_minutes", str(opt_duration)))
+        verbose("Duration:      %dm" % opt_duration)
 
     if opt_target == "host":
         verbose("Host:          %s" % opt_host)
@@ -279,6 +299,11 @@ elif opt_mode == "remove":
     if opt_comment:
         verbose("Limit by:      %s" % opt_comment)
         variables.append(("downtime_comment", opt_comment))
+    elif opt_force:
+        verbose("Remove Dowtimes without limit")
+    else:
+        verbose("Limit by current user (%s)" % (opt_user))
+        variables.append(("downtime_author", opt_user))
 
     if opt_target == "host":
         verbose("Host:          %s" % opt_host)
